@@ -1,0 +1,136 @@
+name: Sync Unlock Music Web
+
+on:
+  schedule:
+    - cron: "0 16 1 * *"  # 每月1号16:00 UTC (0:00 UTC+8)
+  push:
+    branches:
+      - workflow
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up Git
+        run: |
+          git config --global user.name "github-actions"
+          git config --global user.email "github-actions@github.com"
+
+      - name: Clone the target repository
+        run: git clone https://git.unlock-music.dev/um/web.git upstream-repo
+
+      - name: Remove .gitlab folder
+        run: |
+          cd upstream-repo
+          rm -rf .gitlab
+          git rm -r --ignore-unmatch .gitlab
+          git commit -am "Remove .gitlab directory" || echo "No changes to commit"
+      
+      - name: Rewrite README.md
+        run: |
+          cd upstream-repo
+          mv README.md README.zh.md
+          echo "
+          [**README**](README.zh.md)
+          >UM原始仓库: https://github.com/unlock-music/unlock-music **(DMCA)**  
+          >UM官方仓库: https://git.unlock-music.dev/um/web
+          - 本仓库是基于Github Actions的**自动同步仓库**, 用于同步UM官方仓库。  
+          - 本仓库**依照 MIT 协议授权转载，代码与本人无关**。  
+          " > README.md
+          git add README.md README.zh.md
+          git commit -m "Rewrite README.md"
+
+      - name: Create build.yml
+        run: |
+          cd upstream-repo
+          mkdir -p .github/workflows
+          echo -e "name: Build and Package
+          on:
+            push:
+              branches:
+                - master
+            pull_request:
+              branches:
+                - master
+            workflow_dispatch:
+          permissions:
+            contents: write
+          jobs:
+            build:
+              runs-on: ubuntu-latest
+              steps:
+                - name: Checkout repository
+                  uses: actions/checkout@v4
+
+                - name: Set up Node.js
+                  uses: actions/setup-node@v4
+                  with:
+                    node-version: 16
+                    cache: 'npm'
+
+                - name: Install dependencies
+                  run: |
+                    sudo apt-get update
+                    sudo apt-get -y install zip
+                    npm ci
+                  continue-on-error: true
+                
+                - name: Download joox-crypto with curl
+                  run: |
+                    curl -L https://git.unlock-music.dev/api/packages/um/npm/%40unlock-music%2Fjoox-crypto/-/0.0.1/joox-crypto-0.0.1.tgz -o joox-crypto-0.0.1.tgz
+                    npm install joox-crypto-0.0.1.tgz
+                  continue-on-error: true
+
+                - name: Build
+                  run: |
+                    npm run build
+                    ls -R ./dist
+
+                - name: Deploy to GitHub Pages
+                  uses: peaceiris/actions-gh-pages@v3
+                  with:
+                    github_token: \U0024{{ secrets.GITHUB_TOKEN }}
+                    publish_dir: ./dist
+                    publish_branch: latest-release
+                    
+                - name: Build web
+                  run: |
+                    tar -czf legacy.tar.gz -C ./dist .
+                    (cd dist && zip -rJ9 ../legacy.zip *)
+
+                - name: Make extension
+                  run: |
+                    npm run make-extension
+                    (cd dist && zip -rJ9 ../extension.zip *)
+
+                - name: Build modern version
+                  run: |
+                    npm run build -- --modern
+                    tar -czf modern.tar.gz -C ./dist .
+                    (cd dist && zip -rJ9 ../modern.zip *)
+
+                - name: Generate checksums
+                  run: sha256sum *.tar.gz *.zip > sha256sum.txt
+
+                - name: Upload artifacts
+                  uses: actions/upload-artifact@v4
+                  with:
+                    name: artifacts
+                    path: |
+                      legacy.zip
+                      legacy.tar.gz
+                      extension.zip
+                      modern.zip
+                      modern.tar.gz
+                      sha256sum.txt
+
+          " > .github/workflows/build.yml
+          git add .github/workflows/build.yml
+          git commit -m "build.yml"
+
+      - name: Push to private repository
+        run: |
+          cd upstream-repo
+          git remote add private "https://x-access-token:${{ secrets.PAT_TOKEN }}@github.com/coderxi1/unlock-music.git"
+          git push --force private main:master
